@@ -1,4 +1,4 @@
-import React, {useState, useRef, useCallback} from 'react';
+import React, {useState, useRef, useCallback, useEffect} from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,18 @@ import {
   FlatList,
   SafeAreaView,
   Linking,
+  Platform,
 } from 'react-native';
 import {QuickPoseView} from '@quickpose/react-native';
 import {QUICKPOSE_SDK_KEY} from './sdkConfig';
+import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import BottomSheet, { BottomSheetFlatList } from '@gorhom/bottom-sheet';
+
+const hapticOptions = {
+  enableVibrateFallback: true,
+  ignoreAndroidSystemSettings: false,
+};
 
 const FEATURE_CATEGORIES: Record<string, {label: string; feature: string}[]> = {
   Overlay: [
@@ -71,22 +80,58 @@ const CATEGORY_NAMES = Object.keys(FEATURE_CATEGORIES);
 const App = () => {
   const [selectedCategory, setSelectedCategory] = useState(CATEGORY_NAMES[0]);
   const [selectedFeatureIdx, setSelectedFeatureIdx] = useState(0);
-  const [showCategoryPicker, setShowCategoryPicker] = useState(false);
-  const [showFeaturePicker, setShowFeaturePicker] = useState(false);
   const [value, setValue] = useState(0);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [counter, setCounter] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+  const [sessionTime, setSessionTime] = useState(0);
   const wasAboveThreshold = useRef(false);
+  const gestureTimer = useRef<NodeJS.Timeout | null>(null);
 
-  const features = FEATURE_CATEGORIES[selectedCategory];
-  const currentFeature = features[selectedFeatureIdx];
-  const isFitness = currentFeature.feature.startsWith('fitness.');
-  const isPlank = currentFeature.feature === 'fitness.plank';
-  const isROM = currentFeature.feature.startsWith('rangeOfMotion.');
+  // Bottom Sheet Refs
+  const categorySheetRef = useRef<BottomSheet>(null);
+  const featureSheetRef = useRef<BottomSheet>(null);
+
+  useEffect(() => {
+    if (isPaused) return;
+    const interval = setInterval(() => setSessionTime(t => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [isPaused]);
 
   const handleUpdate = useCallback(
     (event: any) => {
       const {results, feedback: fb} = event.nativeEvent;
+      
+      // Hands-Free Control: Thumbs Up (Pause)
+      const thumbsUp = results?.find((r: any) => r.feature === 'thumbsUp');
+      if (thumbsUp && thumbsUp.value > 0.8) {
+        if (!gestureTimer.current) {
+          gestureTimer.current = setTimeout(() => {
+            setIsPaused(p => !p);
+            ReactNativeHapticFeedback.trigger('impactHeavy', hapticOptions);
+          }, 1500);
+        }
+      } else {
+        // Hands-Free Control: Raised Fingers (Next Exercise)
+        const raisedFingers = results?.find((r: any) => r.feature === 'raisedFingers');
+        if (raisedFingers && raisedFingers.value > 0.8 && !isPaused) {
+          if (!gestureTimer.current) {
+            gestureTimer.current = setTimeout(() => {
+              setSelectedFeatureIdx(i => (i + 1) % features.length);
+              setCounter(0);
+              setStreak(0);
+              ReactNativeHapticFeedback.trigger('impactMedium', hapticOptions);
+            }, 1500);
+          }
+        } else if (gestureTimer.current) {
+          clearTimeout(gestureTimer.current);
+          gestureTimer.current = null;
+        }
+      }
+
+      if (isPaused) return;
+
       if (results && results.length > 0) {
         const v = results[0].value;
         setValue(v);
@@ -96,13 +141,24 @@ const App = () => {
             wasAboveThreshold.current = true;
           } else if (v < 0.3 && wasAboveThreshold.current) {
             wasAboveThreshold.current = false;
+            
+            // Intelligence: Streak & Quality Check
+            const isGoodForm = !fb || fb.toLowerCase().includes('good');
             setCounter(c => c + 1);
+            
+            if (isGoodForm) {
+              setStreak(s => s + 1);
+              ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+            } else {
+              setStreak(0);
+              ReactNativeHapticFeedback.trigger('notificationWarning', hapticOptions);
+            }
           }
         }
       }
       setFeedback(fb ?? null);
     },
-    [isFitness, isPlank],
+    [isFitness, isPlank, isPaused],
   );
 
   const selectCategory = (cat: string) => {
@@ -112,7 +168,7 @@ const App = () => {
     setCounter(0);
     setFeedback(null);
     wasAboveThreshold.current = false;
-    setShowCategoryPicker(false);
+    categorySheetRef.current?.close();
   };
 
   const selectFeature = (idx: number) => {
@@ -121,143 +177,190 @@ const App = () => {
     setCounter(0);
     setFeedback(null);
     wasAboveThreshold.current = false;
-    setShowFeaturePicker(false);
+    featureSheetRef.current?.close();
   };
 
   return (
-    <View style={styles.container}>
-      <QuickPoseView
-        sdkKey={QUICKPOSE_SDK_KEY}
-        features={[currentFeature.feature]}
-        useFrontCamera={true}
-        style={styles.camera}
-        onUpdate={handleUpdate}
-      />
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <View style={styles.container}>
+        <QuickPoseView
+          sdkKey={QUICKPOSE_SDK_KEY}
+          features={[currentFeature.feature, 'thumbsUp', 'raisedFingers']}
+          useFrontCamera={true}
+          style={styles.camera}
+          onUpdate={handleUpdate}
+        />
 
-      <SafeAreaView style={styles.topControls}>
-        <TouchableOpacity
-          style={styles.pickerButton}
-          onPress={() => setShowCategoryPicker(true)}>
-          <Text style={styles.pickerButtonText}>{selectedCategory}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.pickerButton}
-          onPress={() => setShowFeaturePicker(true)}>
-          <Text style={styles.pickerButtonText}>{currentFeature.label}</Text>
-        </TouchableOpacity>
-      </SafeAreaView>
+        <SafeAreaView style={styles.topControls}>
+          <View style={styles.hudHeader}>
+            <View>
+              <Text style={styles.appName}>repright</Text>
+              <Text style={styles.sessionTimer}>
+                {isPaused ? 'PAUSED' : formatTime(sessionTime)}
+              </Text>
+            </View>
+            <View style={styles.headerRight}>
+              {streak > 2 && (
+                <View style={styles.streakBadge}>
+                  <Text style={styles.streakText}>🔥 {streak} STREAK</Text>
+                </View>
+              )}
+              <TouchableOpacity
+                style={styles.hudButton}
+                onPress={() => categorySheetRef.current?.expand()}>
+                <Text style={styles.hudButtonText}>{selectedCategory}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.hudButton}
+                onPress={() => featureSheetRef.current?.expand()}>
+                <Text style={styles.hudButtonText}>{currentFeature.label}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </SafeAreaView>
 
-      <View style={styles.valueContainer}>
-        {isROM && (
-          <Text style={styles.valueText}>{Math.round(value)}°</Text>
-        )}
-        {isFitness && !isPlank && (
-          <Text style={styles.valueText}>
-            Count: {counter} ({Math.round(value * 100)}%)
-          </Text>
-        )}
-        {isPlank && (
-          <Text style={styles.valueText}>
-            Hold: {Math.round(value * 100)}%
-          </Text>
-        )}
-        {!isROM && !isFitness && (
-          <Text style={styles.valueText}>
-            {typeof value === 'number' ? value.toFixed(2) : value}
-          </Text>
-        )}
-
-        {isFitness && (
-          <View style={styles.progressBarBackground}>
-            <View
-              style={[
-                styles.progressBarFill,
-                {width: `${Math.min(value * 100, 100)}%`},
-              ]}
-            />
+        {!isPaused && (
+          <View style={styles.coachingHUD}>
+            <Text style={styles.coachingTitle}>AI COACH</Text>
+            <Text style={styles.coachingTip}>
+              {feedback ? feedback : "Ready? Let's go!"}
+            </Text>
+            <View style={styles.gestureHintRow}>
+              <Text style={styles.gestureHint}>👍 Pause</Text>
+              <Text style={styles.gestureHint}>🖐 Next</Text>
+            </View>
           </View>
         )}
-      </View>
 
-      {feedback && (
-        <View style={styles.feedbackContainer}>
-          <Text style={styles.feedbackText}>{feedback}</Text>
+        {isPaused && (
+          <View style={styles.pausedOverlay}>
+            <Text style={styles.pausedText}>SESSION PAUSED</Text>
+            <Text style={styles.pausedSubtext}>Hold Thumbs Up to Resume</Text>
+          </View>
+        )}
+
+        <View style={styles.statsOverlay}>
+          <View style={[
+            styles.repCard,
+            streak >= 5 && styles.repCardStreak
+          ]}>
+            {isFitness && !isPlank && (
+              <>
+                <Text style={[styles.repLabel, streak >= 5 && styles.repLabelStreak]}>
+                  {streak >= 5 ? 'PERFECT REPS' : 'REPS'}
+                </Text>
+                <Text style={styles.repCount}>{counter}</Text>
+                <View style={styles.progressContainer}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      {
+                        width: `${Math.min(value * 100, 100)}%`,
+                        backgroundColor: !feedback || feedback.toLowerCase().includes('good') ? '#00F0FF' : '#FF3D3D'
+                      },
+                    ]}
+                  />
+                </View>
+              </>
+            )}
+            {isPlank && (
+              <>
+                <Text style={styles.repLabel}>HOLD</Text>
+                <Text style={styles.repCount}>{Math.round(value * 100)}%</Text>
+              </>
+            )}
+            {isROM && (
+              <>
+                <Text style={styles.repLabel}>ANGLE</Text>
+                <Text style={styles.repCount}>{Math.round(value)}°</Text>
+              </>
+            )}
+          </View>
         </View>
-      )}
 
-      <SafeAreaView style={styles.bottomBranding}>
-        <TouchableOpacity onPress={() => Linking.openURL('https://quickpose.ai')}>
-          <Text style={styles.brandingText}>Powered by QuickPose.ai</Text>
-        </TouchableOpacity>
-      </SafeAreaView>
+        {feedback && (
+          <View style={styles.feedbackHUD}>
+            <View style={[
+              styles.feedbackBadge,
+              feedback.toLowerCase().includes('good') ? styles.feedbackGood : styles.feedbackAdjust
+            ]}>
+              <Text style={styles.feedbackText}>{feedback}</Text>
+            </View>
+          </View>
+        )}
 
-      <Modal visible={showCategoryPicker} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Select Category</Text>
-            <FlatList
+        <SafeAreaView style={styles.bottomBranding}>
+          <TouchableOpacity onPress={() => Linking.openURL('https://quickpose.ai')}>
+            <Text style={styles.brandingText}>Powered by QuickPose.ai</Text>
+          </TouchableOpacity>
+        </SafeAreaView>
+
+        <BottomSheet
+          ref={categorySheetRef}
+          index={-1}
+          snapPoints={['50%']}
+          enablePanDownToClose
+          backgroundStyle={styles.sheetBackground}
+          handleIndicatorStyle={styles.sheetIndicator}>
+          <View style={styles.sheetContent}>
+            <Text style={styles.sheetTitle}>Select Category</Text>
+            <BottomSheetFlatList
               data={CATEGORY_NAMES}
               keyExtractor={item => item}
               renderItem={({item}) => (
                 <TouchableOpacity
                   style={[
-                    styles.modalItem,
-                    item === selectedCategory && styles.modalItemSelected,
+                    styles.sheetItem,
+                    item === selectedCategory && styles.sheetItemSelected,
                   ]}
                   onPress={() => selectCategory(item)}>
                   <Text
                     style={[
-                      styles.modalItemText,
-                      item === selectedCategory && styles.modalItemTextSelected,
+                      styles.sheetItemText,
+                      item === selectedCategory && styles.sheetItemTextSelected,
                     ]}>
                     {item}
                   </Text>
                 </TouchableOpacity>
               )}
             />
-            <TouchableOpacity
-              style={styles.modalClose}
-              onPress={() => setShowCategoryPicker(false)}>
-              <Text style={styles.modalCloseText}>Cancel</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
+        </BottomSheet>
 
-      <Modal visible={showFeaturePicker} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>{selectedCategory}</Text>
-            <FlatList
+        <BottomSheet
+          ref={featureSheetRef}
+          index={-1}
+          snapPoints={['60%']}
+          enablePanDownToClose
+          backgroundStyle={styles.sheetBackground}
+          handleIndicatorStyle={styles.sheetIndicator}>
+          <View style={styles.sheetContent}>
+            <Text style={styles.sheetTitle}>{selectedCategory}</Text>
+            <BottomSheetFlatList
               data={features}
               keyExtractor={item => item.feature}
               renderItem={({item, index}) => (
                 <TouchableOpacity
                   style={[
-                    styles.modalItem,
-                    index === selectedFeatureIdx && styles.modalItemSelected,
+                    styles.sheetItem,
+                    index === selectedFeatureIdx && styles.sheetItemSelected,
                   ]}
                   onPress={() => selectFeature(index)}>
                   <Text
                     style={[
-                      styles.modalItemText,
+                      styles.sheetItemText,
                       index === selectedFeatureIdx &&
-                        styles.modalItemTextSelected,
+                        styles.sheetItemTextSelected,
                     ]}>
                     {item.label}
                   </Text>
                 </TouchableOpacity>
               )}
             />
-            <TouchableOpacity
-              style={styles.modalClose}
-              onPress={() => setShowFeaturePicker(false)}>
-              <Text style={styles.modalCloseText}>Cancel</Text>
-            </TouchableOpacity>
           </View>
-        </View>
-      </Modal>
-    </View>
+        </BottomSheet>
+      </View>
+    </GestureHandlerRootView>
   );
 };
 
@@ -274,65 +377,231 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
+  },
+  hudHeader: {
     flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingTop: 8,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  pickerButton: {
-    backgroundColor: '#5970F6',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
+  appName: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '900',
+    letterSpacing: -1,
   },
-  pickerButtonText: {
-    color: 'white',
-    fontSize: 14,
+  sessionTimer: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
     fontWeight: '600',
+    marginTop: -2,
   },
-  valueContainer: {
+  headerRight: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  hudButton: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  hudButtonText: {
+    color: 'white',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  statsOverlay: {
     position: 'absolute',
-    bottom: 80,
-    left: 20,
-    right: 20,
+    bottom: 120,
+    left: 0,
+    right: 0,
     alignItems: 'center',
   },
-  valueText: {
-    color: 'white',
-    fontSize: 24,
-    fontWeight: 'bold',
-    marginBottom: 8,
-    textShadowColor: 'rgba(0,0,0,0.7)',
-    textShadowOffset: {width: 1, height: 1},
-    textShadowRadius: 3,
+  repCard: {
+    backgroundColor: 'rgba(20,20,25,0.85)',
+    paddingHorizontal: 32,
+    paddingVertical: 20,
+    borderRadius: 32,
+    minWidth: 160,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 10},
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
   },
-  progressBarBackground: {
-    width: '100%',
-    height: 8,
-    backgroundColor: 'rgba(255,255,255,0.3)',
-    borderRadius: 4,
+  repLabel: {
+    color: '#00F0FF',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 3,
+    marginBottom: 6,
+  },
+  repCount: {
+    color: 'white',
+    fontSize: 64,
+    fontWeight: '900',
+    lineHeight: 64,
+  },
+  progressContainer: {
+    width: 120,
+    height: 6,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 3,
+    marginTop: 16,
     overflow: 'hidden',
   },
-  progressBarFill: {
+  progressFill: {
     height: '100%',
-    backgroundColor: '#5970F6',
-    borderRadius: 4,
+    backgroundColor: '#00F0FF', 
   },
-  feedbackContainer: {
+  coachingHUD: {
     position: 'absolute',
-    top: 120,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(89,112,246,0.85)',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 10,
+    top: 100,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    padding: 16,
+    borderRadius: 20,
+    borderLeftWidth: 4,
+    borderLeftColor: '#00F0FF',
+  },
+  coachingTitle: {
+    color: '#00F0FF',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  coachingTip: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  gestureHintRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+  },
+  gestureHint: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  feedbackHUD: {
+    position: 'absolute',
+    top: 130,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  feedbackBadge: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 40,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 6},
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  feedbackGood: {
+    backgroundColor: '#00D361',
+  },
+  feedbackAdjust: {
+    backgroundColor: '#FF3D3D',
   },
   feedbackText: {
     color: 'white',
+    fontSize: 18,
+    fontWeight: '900',
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  streakBadge: {
+    backgroundColor: '#FF9500',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    marginRight: 8,
+  },
+  streakText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  pausedOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  pausedText: {
+    color: 'white',
+    fontSize: 32,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  pausedSubtext: {
+    color: 'rgba(255,255,255,0.6)',
     fontSize: 16,
     fontWeight: '600',
+    marginTop: 8,
+  },
+  repCardStreak: {
+    borderColor: '#FFD700',
+    borderWidth: 2,
+    backgroundColor: 'rgba(40,35,0,0.9)',
+  },
+  repLabelStreak: {
+    color: '#FFD700',
+  },
+  sheetBackground: {
+    backgroundColor: '#1C1C1E',
+  },
+  sheetIndicator: {
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    width: 40,
+  },
+  sheetContent: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 10,
+  },
+  sheetTitle: {
+    color: 'white',
+    fontSize: 20,
+    fontWeight: '800',
+    marginBottom: 20,
     textAlign: 'center',
+  },
+  sheetItem: {
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    marginBottom: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  sheetItemSelected: {
+    backgroundColor: 'rgba(0,240,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0,240,255,0.3)',
+  },
+  sheetItemText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  sheetItemTextSelected: {
+    color: '#00F0FF',
+    fontWeight: '800',
   },
   modalOverlay: {
     flex: 1,

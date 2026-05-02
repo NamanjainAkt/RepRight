@@ -11,9 +11,13 @@
     "postinstall": "bash ../scripts/postinstall.sh"
   },
   "dependencies": {
+    "@gorhom/bottom-sheet": "^4.6.4",
     "@quickpose/react-native": "file:..",
     "react": "18.3.1",
-    "react-native": "0.76.9"
+    "react-native": "0.76.9",
+    "react-native-gesture-handler": "^2.31.1",
+    "react-native-haptic-feedback": "^3.0.0",
+    "react-native-reanimated": "^3.19.5"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
