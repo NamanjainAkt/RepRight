@@ -2,8 +2,6 @@
 
 **repright** is an immersive, AI-powered fitness application built with React Native and ML pose estimation. It provides real-time body tracking, rep counting, and form coaching to help you workout with perfect technique—entirely hands-free.
 
-![](img/react-native-demo.jpg)
-
 ## 🌟 Key Features
 
 - **🤖 AI Form Coaching:** Real-time feedback HUD that color-codes your form (Cyan for Perfect, Red for Adjust).
